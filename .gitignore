@@ -1,0 +1,10 @@
+# Build artifacts
+/build/
+
+# Editor/OS cruft
+*.swp
+*~
+.DS_Store
+
+# Learning process
+/learn/
