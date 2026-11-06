@@ -1,0 +1,51 @@
+#!/usr/bin/bash
+# Only bash builtins and the binaries the generator copied: no coreutils here.
+PATH=/usr/bin
+
+say() {
+	echo "tundra-initramfs: $*" >&2
+}
+
+rescue() {
+	say "$*; starting a shell"
+	exec bash
+}
+
+mount -t proc proc /proc || rescue "cannot mount /proc"
+mount -t sysfs sysfs /sys || rescue "cannot mount /sys"
+mount -t devtmpfs devtmpfs /dev || rescue "cannot mount /dev"
+
+read -r cmdline </proc/cmdline
+root=
+flags=
+fstype=
+mode=ro
+init=/sbin/init
+for arg in $cmdline; do
+	case $arg in
+	root=*) root=${arg#root=} ;;
+	rootflags=*) flags=${arg#rootflags=} ;;
+	rootfstype=*) fstype=${arg#rootfstype=} ;;
+	ro | rw) mode=$arg ;;
+	init=*) init=${arg#init=} ;;
+	esac
+done
+[ -n "$root" ] || rescue "no root= on the command line"
+
+modprobe -a $(</usr/lib/tundra-initramfs/modules) || say "cannot load every module"
+
+# Disks can take a while to show up on real hardware.
+dev=
+for ((i = 0; i < 100; i++)); do
+	case $root in
+	/dev/*) [ -b "$root" ] && dev=$root ;;
+	*=*) dev=$(findfs "$root" 2>/dev/null) ;;
+	esac
+	[ -n "$dev" ] && break
+	sleep 0.1
+done
+[ -n "$dev" ] || rescue "root $root not found"
+
+mount ${fstype:+-t "$fstype"} -o "$mode${flags:+,$flags}" "$dev" /sysroot ||
+	rescue "cannot mount $dev on /sysroot"
+exec switch_root /sysroot "$init"

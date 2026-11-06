@@ -1,0 +1,146 @@
+#!/bin/bash
+set -euo pipefail
+
+# The hardware is fixed (ADR-002): virtio in the VM; nvme is built in.
+MODULES=(virtio_pci virtio_blk btrfs)
+BINS=(bash mount switch_root findfs kmod sleep)
+LDSO=/usr/lib/ld-linux-x86-64.so.2
+INIT=${TUNDRA_INITRAMFS_INIT:-/usr/lib/tundra-initramfs/init}
+
+usage() {
+	echo "usage: tundra-initramfs [-b <dir>] <kernel-version> <output>"
+	echo "  -b <dir>  take the modules from <dir>/usr/lib/modules"
+}
+
+die() {
+	echo "tundra-initramfs: $*" >&2
+	exit 1
+}
+
+base=/
+while getopts b:h opt; do
+	case $opt in
+	b) base=$OPTARG ;;
+	h)
+		usage
+		exit 0
+		;;
+	*)
+		usage >&2
+		exit 2
+		;;
+	esac
+done
+shift $((OPTIND - 1))
+if [ $# -ne 2 ] || ! [[ $1 =~ ^[A-Za-z0-9._+-]+$ ]]; then
+	usage >&2
+	exit 2
+fi
+kver=$1
+output=$2
+prefix=${base%/}
+moddir=$prefix/usr/lib/modules/$kver
+
+[ -d "$moddir" ] || die "no modules for $kver in $moddir"
+[ -f "$moddir/modules.dep.bin" ] || die "no modules.dep.bin in $moddir: run depmod"
+[ -r "$INIT" ] || die "cannot read $INIT"
+for cmd in bsdtar depmod modprobe modinfo find sort; do
+	command -v "$cmd" >/dev/null || die "missing command: $cmd"
+done
+
+umask 022
+stage=$(mktemp -d)
+view=$(mktemp -d)
+tmp=$output.tmp.$$
+trap 'rm -rf "$stage" "$view" "$tmp"' EXIT
+
+mkdir -p "$stage"/{usr/bin,usr/lib/tundra-initramfs,dev,proc,sys,run,sysroot}
+ln -s usr/bin "$stage/bin"
+ln -s usr/bin "$stage/sbin"
+ln -s usr/lib "$stage/lib"
+ln -s usr/lib "$stage/lib64"
+
+# Each library goes where the loader of the host found it; with the
+# usr-merge links above, /lib64/ld-linux-x86-64.so.2 resolves too.
+copy_libs() {
+	local bin=$1 line lib out
+	out=$("$LDSO" --list "$bin") || die "cannot list the libraries of $bin"
+	while read -r line; do
+		case $line in
+		*"=> not found"*) die "$bin: missing ${line%% *}" ;;
+		*"=> /"*)
+			lib=${line#*=> }
+			lib=${lib%% (*}
+			;;
+		/*) lib=${line%% (*} ;;
+		*) continue ;;
+		esac
+		if [ ! -e "$stage$lib" ]; then
+			mkdir -p "$stage${lib%/*}"
+			cp -L "$lib" "$stage$lib"
+		fi
+	done <<<"$out"
+}
+
+for name in "${BINS[@]}"; do
+	path=$(command -v "$name") || die "missing command: $name"
+	real=$(readlink -f "$path")
+	cp "$real" "$stage/usr/bin/$name"
+	copy_libs "$real"
+done
+ln -s kmod "$stage/usr/bin/modprobe"
+
+# kmod looks in lib/modules or usr/lib/modules depending on how it was built,
+# and a tree given with -b need not have the usr-merge links.
+mkdir "$view/usr"
+ln -s "$prefix/usr/lib" "$view/usr/lib"
+ln -s "$prefix/usr/lib" "$view/lib"
+# kmod leaves out a softdep it takes for built in, as btrfs's crc32c, which
+# the crypto API still needs as a module: each softdep is resolved on its own
+# and loaded by name before the modules.
+queue=("${MODULES[@]}")
+soft=()
+for ((i = 0; i < ${#queue[@]}; i++)); do
+	name=${queue[i]}
+	if ! deps=$(modprobe -d "$view" -S "$kver" --show-depends "$name" 2>/dev/null); then
+		[ "$i" -lt ${#MODULES[@]} ] && die "cannot resolve $name for $kver"
+		continue
+	fi
+	while read -r kind path _; do
+		case $kind in
+		insmod)
+			rel=${path#"$view"}
+			[ -e "$stage$rel" ] && continue
+			mkdir -p "$stage${rel%/*}"
+			cp "$path" "$stage$rel"
+			for dep in $(modinfo -F softdep "$path" | sed -E 's/(pre|post)://g'); do
+				case " ${queue[*]} " in
+				*" $dep "*) ;;
+				*)
+					queue+=("$dep")
+					soft+=("$dep")
+					;;
+				esac
+			done
+			;;
+		builtin) ;;
+		*) die "unexpected line from modprobe: $kind $path" ;;
+		esac
+	done <<<"$deps"
+done
+mkdir -p "$stage/usr/lib/modules/$kver"
+for f in modules.order modules.builtin modules.builtin.modinfo; do
+	if [ -f "$moddir/$f" ]; then
+		cp "$moddir/$f" "$stage/usr/lib/modules/$kver/"
+	fi
+done
+depmod -b "$stage" "$kver" || die "depmod failed for $kver"
+printf '%s\n' "${soft[@]}" "${MODULES[@]}" >"$stage/usr/lib/tundra-initramfs/modules"
+
+install -m755 "$INIT" "$stage/init"
+
+# The image is readable only by root, like the kernel it boots.
+(cd "$stage" && find . -mindepth 1 | LC_ALL=C sort) |
+	(umask 077 && bsdtar -c -n --format newc --uid 0 --gid 0 --zstd -f "$tmp" \
+		-C "$stage" -T -) || die "cannot write $output"
+mv -f "$tmp" "$output"
