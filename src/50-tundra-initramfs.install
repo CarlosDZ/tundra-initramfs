@@ -1,0 +1,25 @@
+#!/bin/bash
+# kernel-install plugin: the initrd goes to the staging area, from where
+# 90-loaderentry copies it to $BOOT next to the kernel.
+set -euo pipefail
+
+command=${1:-}
+version=${2:-}
+
+[ "$command" = add ] || exit 0
+# Initrds given by the caller are used as they are.
+[ $# -le 4 ] || exit 0
+[ "${KERNEL_INSTALL_INITRD_GENERATOR:-tundra-initramfs}" = tundra-initramfs ] || exit 0
+case ${KERNEL_INSTALL_LAYOUT:-} in
+bls | uki) ;;
+*) exit 0 ;;
+esac
+if [ -z "${KERNEL_INSTALL_STAGING_AREA:-}" ]; then
+	echo "tundra-initramfs: no KERNEL_INSTALL_STAGING_AREA" >&2
+	exit 1
+fi
+
+if [ "${KERNEL_INSTALL_VERBOSE:-0}" -gt 0 ]; then
+	echo "tundra-initramfs: initrd for $version"
+fi
+exec tundra-initramfs "$version" "$KERNEL_INSTALL_STAGING_AREA/initrd"

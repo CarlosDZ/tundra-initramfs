@@ -1,0 +1,3 @@
+#!/bin/sh
+# xbps kernel hook (xbps-triggers kernel-hooks): $1 package, $2 kernel version.
+exec kernel-install add "$2" "/boot/vmlinuz-$2"
