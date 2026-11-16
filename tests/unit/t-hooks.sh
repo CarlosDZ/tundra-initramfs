@@ -7,7 +7,6 @@ mkdir -p "$bin" "$TMP/stage"
 ln -s "$PWD/$GEN" "$bin/tundra-initramfs"
 export TUNDRA_INITRAMFS_INIT=$PWD/src/init
 
-# Runs the plugin as kernel-install does, with a fresh staging area.
 plugin() {
 	rm -rf "$TMP/stage"
 	mkdir "$TMP/stage"
@@ -36,7 +35,6 @@ check "nothing when the caller gives the initrds" \
 check "nothing on remove" \
 	not_staged env KERNEL_INSTALL_LAYOUT=bls "$PLUGIN" remove "$kver" /entry
 
-# The xbps hooks, with a kernel-install that records its arguments.
 printf '#!/bin/sh\necho "$*" >"%s/args"\n' "$TMP" >"$bin/kernel-install"
 chmod +x "$bin/kernel-install"
 hook() {
